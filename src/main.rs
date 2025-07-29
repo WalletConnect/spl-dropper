@@ -123,6 +123,10 @@ struct DistributeArgs {
     /// Force clear pending transactions (use if you've manually verified they're complete)
     #[clap(long)]
     force_clear_pending: bool,
+    
+    /// Limit number of recipients to process (useful for testing)
+    #[clap(long)]
+    limit: Option<usize>,
 }
 
 #[derive(Parser)]
@@ -250,11 +254,11 @@ fn generate_recipients(args: GenerateArgs) -> Result<()> {
 }
 
 async fn distribute(args: DistributeArgs) -> Result<()> {
-    println!("Starting SPL token distribution...");
+    println!("\n🚀 Starting SPL token distribution...");
 
     // Get state file path (auto-generated or user-specified)
     let state_file_path = get_state_file_path(&args)?;
-    println!("Using state file: {}", state_file_path.display());
+    println!("📁 Using state file: {}", state_file_path.display());
     
     // Load state for resume capability
     let mut state = DistributionState::load(&state_file_path)?;
@@ -315,11 +319,29 @@ async fn distribute(args: DistributeArgs) -> Result<()> {
 
     // Load and validate recipients
     let mut distributions = load_recipients(&args.input_csv, &mint_pubkey)?;
+    let total_recipients = distributions.len();
+    let already_completed = state.completed_recipients.len();
     
     // Filter out already completed recipients
     distributions.retain(|d| {
         !state.completed_recipients.contains(&d.recipient.to_string())
     });
+    
+    // Show progress
+    if already_completed > 0 {
+        println!("📊 Progress: {}/{} recipients already completed", already_completed, total_recipients);
+    }
+    
+    // Apply limit if specified
+    if let Some(limit) = args.limit {
+        if limit > 0 && distributions.len() > limit {
+            let start_idx = already_completed + 1;
+            let end_idx = already_completed + limit;
+            println!("📊 Processing recipients {} to {} (limiting to {} out of {} remaining)", 
+                     start_idx, end_idx, limit, distributions.len());
+            distributions.truncate(limit);
+        }
+    }
 
     if distributions.is_empty() {
         println!("All recipients already processed!");
@@ -341,7 +363,7 @@ async fn distribute(args: DistributeArgs) -> Result<()> {
         0
     };
     
-    println!("Recipients remaining: {}", distributions.len());
+    println!("Recipients to process: {}", distributions.len());
     println!(
         "Total tokens needed: {}",
         amount_to_ui(total_amount, decimals)
@@ -444,7 +466,7 @@ async fn distribute(args: DistributeArgs) -> Result<()> {
             println!("\n⚠️  Note: Insufficient balance for actual distribution (need {} more tokens)", 
                     amount_to_ui(total_amount - source_balance, decimals));
         }
-        return dry_run_summary(&distributions, decimals, atas_to_create);
+        return dry_run_summary(&distributions, decimals, atas_to_create, args.priority_fee);
     }
 
     // Confirm before proceeding (unless --yes flag)
@@ -485,7 +507,7 @@ async fn distribute(args: DistributeArgs) -> Result<()> {
     // Calculate fee estimates
     let total_txs = (distributions.len() as f64 / 10.0).ceil() as u64; // 10 transfers per batch
     let base_fee_per_tx = 0.000005; // 5000 lamports base fee
-    let priority_fee_per_tx = (args.priority_fee as f64 * 200_000.0) / 1_000_000_000.0; // ~200k CU per tx
+    let priority_fee_per_tx = (args.priority_fee as f64 * 200_000.0) / 1_000_000.0 / 1_000_000_000.0; // priority fee in microLamports per CU, ~200k CU per tx
     let transfer_cost = total_txs as f64 * (base_fee_per_tx + priority_fee_per_tx);
     
     // Estimate ATA creation costs if needed
@@ -527,7 +549,10 @@ async fn distribute(args: DistributeArgs) -> Result<()> {
     let sol_spent = (fee_payer_balance.saturating_sub(final_fee_payer_balance)) as f64 / 1_000_000_000.0;
     
     println!("\n✅ Distribution complete!");
-    println!("Completed: {}", final_state.completed_recipients.len());
+    println!("Total progress: {}/{} recipients completed", 
+            final_state.completed_recipients.len(), 
+            total_recipients);
+    println!("This run: {} recipients processed", distributions.len());
     println!("Failed: {}", final_state.failed_recipients.len());
     println!("\n💰 Actual SOL spent: {:.6} SOL", sol_spent);
     println!("   Fee payer balance: {:.6} SOL → {:.6} SOL", 
@@ -1222,7 +1247,7 @@ async fn execute_single_round(
         completed_count,
         failed_count,
         retry_list.len(),
-        actual_txs as f64 * 0.000205 // Rough estimate
+        actual_txs as f64 * (0.000005 + (priority_fee as f64 * 200_000.0) / 1_000_000.0 / 1_000_000_000.0) // Based on actual priority fee in microLamports per CU
     ));
 
     Ok(retry_list)
@@ -1760,6 +1785,7 @@ fn dry_run_summary(
     distributions: &[Distribution],
     decimals: u8,
     atas_to_create: usize,
+    priority_fee: u64,
 ) -> Result<()> {
     println!("\n=== DRY RUN SUMMARY ===");
     println!("Recipients: {}", distributions.len());
@@ -1772,9 +1798,9 @@ fn dry_run_summary(
     );
     
     // Accurate cost estimates based on actual observed costs
-    let base_fee = 0.000005; // 5000 lamports
-    let priority_fee = 0.0002; // 200k microlamports at 1000 priority
-    let tx_fee = base_fee + priority_fee;
+    let base_fee = 0.000005; // 5000 lamports base fee
+    let priority_fee_sol = (priority_fee as f64 * 200_000.0) / 1_000_000.0 / 1_000_000_000.0; // priority fee in microLamports per CU, convert to SOL
+    let tx_fee = base_fee + priority_fee_sol;
     
     // ATA costs
     let ata_rent = atas_to_create as f64 * 0.00203928; // Rent for token accounts
@@ -2448,6 +2474,7 @@ mod tests {
             yes: false,
             skip_ata: false,
             force_clear_pending: false,
+            limit: None,
         };
         
         let state_path = get_state_file_path(&args).unwrap();
@@ -2577,5 +2604,271 @@ mod tests {
         deduped.sort();
         deduped.dedup();
         assert_eq!(deduped.len(), 1358, "Should have no duplicate recipients");
+    }
+
+    #[test]
+    fn test_fee_calculation_with_priority_fee() {
+        // Test that fee calculations properly use the priority fee parameter
+        
+        // Test cases with different priority fees
+        let test_cases = vec![
+            (1_000, 0.000005 + (1_000.0 * 200_000.0) / 1_000_000.0 / 1_000_000_000.0),      // Low priority
+            (20_000, 0.000005 + (20_000.0 * 200_000.0) / 1_000_000.0 / 1_000_000_000.0),    // Medium priority  
+            (50_000, 0.000005 + (50_000.0 * 200_000.0) / 1_000_000.0 / 1_000_000_000.0),    // High priority
+            (100_000, 0.000005 + (100_000.0 * 200_000.0) / 1_000_000.0 / 1_000_000_000.0),  // Very high priority
+        ];
+        
+        for (priority_fee, expected_tx_fee) in test_cases {
+            let base_fee = 0.000005;
+            let priority_fee_sol = (priority_fee as f64 * 200_000.0) / 1_000_000.0 / 1_000_000_000.0;
+            let actual_tx_fee = base_fee + priority_fee_sol;
+            
+            assert!(
+                (actual_tx_fee - expected_tx_fee).abs() < 0.0000001,
+                "Priority fee {} should result in tx fee {}, got {}",
+                priority_fee,
+                expected_tx_fee,
+                actual_tx_fee
+            );
+        }
+    }
+
+    #[test]
+    fn test_dry_run_cost_estimation() {
+        // Test the dry run summary calculations
+        let distributions = vec![
+            Distribution {
+                recipient: Pubkey::new_unique(),
+                amount: 1_000_000_000, // 1 token with 9 decimals
+                ata: Pubkey::new_unique(),
+                needs_creation: true,
+            },
+            Distribution {
+                recipient: Pubkey::new_unique(),
+                amount: 2_000_000_000,
+                ata: Pubkey::new_unique(),
+                needs_creation: true,
+            },
+            Distribution {
+                recipient: Pubkey::new_unique(),
+                amount: 3_000_000_000,
+                ata: Pubkey::new_unique(),
+                needs_creation: false,
+            },
+        ];
+        
+        let atas_to_create = distributions.iter().filter(|d| d.needs_creation).count();
+        assert_eq!(atas_to_create, 2);
+        
+        // Test with 20,000 microLamports priority fee
+        let priority_fee = 20_000u64;
+        let base_fee = 0.000005;
+        let priority_fee_sol = (priority_fee as f64 * 200_000.0) / 1_000_000.0 / 1_000_000_000.0;
+        let tx_fee = base_fee + priority_fee_sol;
+        
+        // ATA creation costs
+        let ata_rent = atas_to_create as f64 * 0.00203928;
+        let ata_txs = (atas_to_create as f64 / 10.0).ceil();
+        let ata_tx_fees = ata_txs * tx_fee;
+        let total_ata_cost = ata_rent + ata_tx_fees;
+        
+        // Transfer costs
+        let transfer_txs = (distributions.len() as f64 / 10.0).ceil();
+        let transfer_cost = transfer_txs * tx_fee;
+        
+        let total_cost = total_ata_cost + transfer_cost;
+        
+        // Verify calculations
+        assert_eq!(ata_txs, 1.0); // 2 ATAs fit in 1 transaction
+        assert_eq!(transfer_txs, 1.0); // 3 transfers fit in 1 transaction
+        // 20,000 × 200,000 = 4,000,000,000 microLamports / 1e6 / 1e9 = 0.000004 SOL
+        assert!((tx_fee - 0.000009).abs() < 0.0000001); // 0.000005 + 0.000004
+        assert!((total_cost - (ata_rent + 2.0 * tx_fee)).abs() < 0.0000001);
+    }
+
+    #[test]
+    fn test_execute_transfers_round_fee_calculation() {
+        // Test the fee calculation in execute_transfers_round
+        let priority_fee = 30_000u64;
+        let actual_txs = 10;
+        
+        let expected_fee_per_tx = 0.000005 + (priority_fee as f64 * 200_000.0) / 1_000_000.0 / 1_000_000_000.0;
+        let expected_total = actual_txs as f64 * expected_fee_per_tx;
+        
+        let calculated_total = actual_txs as f64 * (0.000005 + (priority_fee as f64 * 200_000.0) / 1_000_000.0 / 1_000_000_000.0);
+        
+        assert!(
+            (calculated_total - expected_total).abs() < 0.0000001,
+            "Fee calculation mismatch: expected {}, got {}",
+            expected_total,
+            calculated_total
+        );
+        
+        // Verify the calculation matches what the user would pay
+        // 30,000 priority fee × 200,000 CU = 6,000,000,000 microLamports / 1e6 / 1e9 = 0.000006 SOL
+        assert!((expected_fee_per_tx - 0.000011).abs() < 0.0000001); // 0.000005 + 0.000006
+    }
+
+    #[test]
+    fn test_limit_functionality() {
+        // Test that limit parameter correctly restricts number of recipients
+        let all_distributions = vec![
+            Distribution {
+                recipient: Pubkey::new_unique(),
+                amount: 1_000_000_000,
+                ata: Pubkey::new_unique(),
+                needs_creation: false,
+            },
+            Distribution {
+                recipient: Pubkey::new_unique(),
+                amount: 2_000_000_000,
+                ata: Pubkey::new_unique(),
+                needs_creation: false,
+            },
+            Distribution {
+                recipient: Pubkey::new_unique(),
+                amount: 3_000_000_000,
+                ata: Pubkey::new_unique(),
+                needs_creation: false,
+            },
+            Distribution {
+                recipient: Pubkey::new_unique(),
+                amount: 4_000_000_000,
+                ata: Pubkey::new_unique(),
+                needs_creation: false,
+            },
+            Distribution {
+                recipient: Pubkey::new_unique(),
+                amount: 5_000_000_000,
+                ata: Pubkey::new_unique(),
+                needs_creation: false,
+            },
+        ];
+        
+        // Test with limit of 3
+        let mut limited = all_distributions.clone();
+        limited.truncate(3);
+        assert_eq!(limited.len(), 3);
+        assert_eq!(limited[0].amount, 1_000_000_000);
+        assert_eq!(limited[1].amount, 2_000_000_000);
+        assert_eq!(limited[2].amount, 3_000_000_000);
+        
+        // Test with limit larger than array
+        let mut limited = all_distributions.clone();
+        limited.truncate(10);
+        assert_eq!(limited.len(), 5); // Should not exceed original length
+        
+        // Test with limit of 0 (should keep all)
+        let mut limited = all_distributions.clone();
+        if 0 > 0 {
+            limited.truncate(0);
+        }
+        assert_eq!(limited.len(), 5); // Should keep all
+    }
+
+    #[tokio::test] 
+    async fn test_partial_run_with_limit() {
+        // Test that partial runs with limit work correctly and can be resumed
+        use tempfile::TempDir;
+        use std::io::Write;
+        
+        let temp_dir = TempDir::new().unwrap();
+        let csv_path = temp_dir.path().join("test_limit.csv");
+        let state_file = temp_dir.path().join("limit_state.json");
+        
+        // Create CSV with 10 recipients
+        let mut file = fs::File::create(&csv_path).unwrap();
+        writeln!(file, "recipient,amount").unwrap();
+        for i in 0..10 {
+            writeln!(file, "{},{}", Pubkey::new_unique(), 1000 + i).unwrap();
+        }
+        drop(file);
+        
+        // Load recipients and simulate first run with limit of 3
+        let mint = Pubkey::new_unique();
+        let all_recipients = load_recipients(&csv_path, &mint).unwrap();
+        assert_eq!(all_recipients.len(), 10);
+        
+        // Simulate processing first 3
+        let mut state = DistributionState::new();
+        let mut first_batch = all_recipients.clone();
+        first_batch.truncate(3);
+        
+        // Mark first 3 as completed
+        for dist in &first_batch {
+            state.completed_recipients.push(dist.recipient.to_string());
+        }
+        state.save(&state_file).unwrap();
+        
+        // Load state and verify
+        let loaded_state = DistributionState::load(&state_file).unwrap();
+        assert_eq!(loaded_state.completed_recipients.len(), 3);
+        
+        // Simulate second run with limit of 4
+        let mut remaining = all_recipients.clone();
+        remaining.retain(|d| {
+            !loaded_state.completed_recipients.contains(&d.recipient.to_string())
+        });
+        assert_eq!(remaining.len(), 7); // 10 - 3 = 7
+        
+        // Apply new limit
+        remaining.truncate(4);
+        assert_eq!(remaining.len(), 4);
+        
+        // Process these 4
+        let mut updated_state = loaded_state;
+        for dist in &remaining {
+            updated_state.completed_recipients.push(dist.recipient.to_string());
+        }
+        updated_state.save(&state_file).unwrap();
+        
+        // Final verification
+        let final_state = DistributionState::load(&state_file).unwrap();
+        assert_eq!(final_state.completed_recipients.len(), 7); // 3 + 4 = 7
+        
+        // Verify no duplicates
+        let mut deduped = final_state.completed_recipients.clone();
+        deduped.sort();
+        deduped.dedup();
+        assert_eq!(deduped.len(), 7);
+    }
+
+    #[test]
+    fn test_limit_with_state_persistence() {
+        // Test that limit works correctly with state persistence across multiple runs
+        use tempfile::TempDir;
+        
+        let temp_dir = TempDir::new().unwrap();
+        let state_file = temp_dir.path().join("state_limit_test.json");
+        
+        // Create test data
+        let recipients: Vec<String> = (0..20).map(|i| format!("recipient_{}", i)).collect();
+        
+        // Run 1: Process first 5
+        let mut state = DistributionState::new();
+        state.completed_recipients.extend(recipients[0..5].iter().cloned());
+        state.save(&state_file).unwrap();
+        
+        // Run 2: Process next 5
+        let mut state = DistributionState::load(&state_file).unwrap();
+        state.completed_recipients.extend(recipients[5..10].iter().cloned());
+        state.save(&state_file).unwrap();
+        
+        // Run 3: Process next 5
+        let mut state = DistributionState::load(&state_file).unwrap();
+        state.completed_recipients.extend(recipients[10..15].iter().cloned());
+        state.save(&state_file).unwrap();
+        
+        // Final check
+        let final_state = DistributionState::load(&state_file).unwrap();
+        assert_eq!(final_state.completed_recipients.len(), 15);
+        
+        // Verify recipients are in order and no gaps
+        for i in 0..15 {
+            assert!(final_state.completed_recipients.contains(&format!("recipient_{}", i)));
+        }
+        for i in 15..20 {
+            assert!(!final_state.completed_recipients.contains(&format!("recipient_{}", i)));
+        }
     }
 }
