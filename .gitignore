@@ -1,0 +1,51 @@
+# Rust
+/target/
+Cargo.lock
+**/*.rs.bk
+*.pdb
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Security - NEVER commit these
+*.json
+!Cargo.json
+!package.json
+*.key
+*.pem
+*.keypair
+
+# Local state and data
+.spl-dropper-state/
+distribution_state.json
+*.db
+
+# Test data
+devnet_recipients*.csv
+test*.csv
+completed.txt
+
+# Logs
+*.log
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Backup files
+*.backup
+*.bak
+*.tmp
+*.temp
+
+# Documentation build
+docs/_build/

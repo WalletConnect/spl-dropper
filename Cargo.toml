@@ -1,0 +1,28 @@
+[package]
+name = "spl-dropper"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+csv = "1"
+serde = { version = "1", features = ["derive"] }
+anyhow = "1"
+solana-client = "2.3"
+solana-sdk = "2.3"
+solana-transaction-status = "2.3"
+spl-token = "4.0"
+spl-associated-token-account = "3.0"
+serde_json = "1.0"
+governor = { version = "0.6", features = ["std", "jitter"] }
+indicatif = "0.17"
+futures = "0.3"
+bincode = "1"
+base64 = "0.21"
+serde-aux = "4.0"
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3.0"
