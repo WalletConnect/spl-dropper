@@ -87,14 +87,6 @@ spl-dropper generate-recipients \
   --output test_recipients.csv
 ```
 
-### Create Address Lookup Table
-For distributions over 256 unique addresses:
-```bash
-spl-dropper create-alt \
-  --fee-payer payer.json \
-  --url <RPC_URL> \
-  --recipients-csv recipients.csv
-```
 
 ## State Management
 

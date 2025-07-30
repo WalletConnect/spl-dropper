@@ -6,16 +6,15 @@ use serde::{Deserialize, Serialize};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_transaction_status::TransactionConfirmationStatus;
 use solana_sdk::{
-    address_lookup_table::{state::AddressLookupTable, AddressLookupTableAccount},
     commitment_config::CommitmentConfig,
     compute_budget::ComputeBudgetInstruction,
     hash::Hash,
     instruction::Instruction,
-    message::{v0, VersionedMessage},
+    message::VersionedMessage,
     pubkey::Pubkey,
     signature::{Keypair, Signature},
     signer::Signer,
-    transaction::{Transaction, VersionedTransaction},
+    transaction::VersionedTransaction,
     program_pack::Pack,
 };
 use spl_associated_token_account::{
@@ -58,8 +57,6 @@ enum Commands {
     Distribute(DistributeArgs),
     /// Generate test recipients
     GenerateRecipients(GenerateArgs),
-    /// Create Address Lookup Table
-    CreateAlt(CreateAltArgs),
 }
 
 #[derive(Parser)]
@@ -96,9 +93,6 @@ struct DistributeArgs {
     #[clap(long, default_value = "10")]
     rate_limit: u32,
 
-    /// Address Lookup Table (optional)
-    #[clap(long)]
-    alt: Option<String>,
 
     /// Resume file for crash recovery (auto-generated if not specified)
     #[clap(long)]
@@ -144,20 +138,6 @@ struct GenerateArgs {
     output: PathBuf,
 }
 
-#[derive(Parser)]
-struct CreateAltArgs {
-    /// Fee payer keypair path
-    #[clap(long)]
-    fee_payer: PathBuf,
-
-    /// RPC URL
-    #[clap(long)]
-    url: String,
-
-    /// Recipients CSV to include in ALT
-    #[clap(long)]
-    recipients_csv: PathBuf,
-}
 
 #[derive(Debug, Deserialize, Serialize)]
 struct Recipient {
@@ -220,7 +200,6 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Distribute(args) => distribute(args).await,
         Commands::GenerateRecipients(args) => generate_recipients(args),
-        Commands::CreateAlt(args) => create_alt(args).await,
     }
 }
 
@@ -289,18 +268,6 @@ async fn distribute(args: DistributeArgs) -> Result<()> {
         CommitmentConfig::confirmed(),
     ));
 
-    // Load ALT if provided
-    let alt_account = if let Some(alt_str) = &args.alt {
-        let alt_pubkey = Pubkey::from_str(alt_str)?;
-        let alt = load_alt(&client, &alt_pubkey).await?;
-        
-        // Validate ALT completeness
-        validate_alt_completeness(&alt, &mint_pubkey, &source_pubkey, &owner.pubkey())?;
-        
-        Some(alt)
-    } else {
-        None
-    };
 
     // Get mint info
     let mint_account = client.get_account(&mint_pubkey).await?;
@@ -490,7 +457,6 @@ async fn distribute(args: DistributeArgs) -> Result<()> {
             &distributions,
             &mint_pubkey,
             &fee_payer,
-            &alt_account,
             args.priority_fee,
         ).await?;
         println!("✅ All ATAs created successfully\n");
@@ -534,7 +500,6 @@ async fn distribute(args: DistributeArgs) -> Result<()> {
         &owner,
         &fee_payer,
         decimals,
-        alt_account,
         args.priority_fee,
         rate_limiter,
         &mut state,
@@ -688,7 +653,6 @@ async fn create_atas_batch(
     distributions: &[Distribution],
     mint: &Pubkey,
     fee_payer: &Keypair,
-    alt_account: &Option<AddressLookupTableAccount>,
     priority_fee: u64,
 ) -> Result<()> {
     // Create a rate limiter for ATA creation
@@ -750,11 +714,7 @@ async fn create_atas_batch(
         // Skip CU simulation for ATA batches - they're predictable and small
         let cu_limit = 200_000;
         
-        let test_msg = if let Some(alt) = alt_account {
-            create_v0_message_with_cu(&test_batch, &fee_payer.pubkey(), alt, priority_fee, cu_limit, test_blockhash)?
-        } else {
-            create_legacy_message_with_cu(&test_batch, &fee_payer.pubkey(), priority_fee, cu_limit, test_blockhash)?
-        };
+        let test_msg = create_legacy_message_with_cu(&test_batch, &fee_payer.pubkey(), priority_fee, cu_limit, test_blockhash)?;
 
         // Check size with proper serialization
         let test_tx = VersionedTransaction::try_new(test_msg, &[fee_payer])?;
@@ -768,7 +728,6 @@ async fn create_atas_batch(
                     client,
                     current_batch,
                     fee_payer,
-                    alt_account,
                     priority_fee,
                     &rate_limiter,
                 ).await?;
@@ -787,7 +746,6 @@ async fn create_atas_batch(
                 client,
                 current_batch,
                 fee_payer,
-                alt_account,
                 priority_fee,
                 &rate_limiter,
             ).await?;
@@ -803,7 +761,6 @@ async fn create_atas_batch(
             client,
             current_batch,
             fee_payer,
-            alt_account,
             priority_fee,
             &rate_limiter,
         ).await?;
@@ -821,7 +778,6 @@ async fn execute_transfers_async(
     owner: &Keypair,
     fee_payer: &Keypair,
     decimals: u8,
-    alt_account: Option<AddressLookupTableAccount>,
     priority_fee: u64,
     rate_limiter: Arc<RateLimiter<
         governor::state::direct::NotKeyed,
@@ -849,7 +805,6 @@ async fn execute_transfers_async(
             owner,
             fee_payer,
             decimals,
-            alt_account.clone(),
             priority_fee,
             rate_limiter.clone(),
             state,
@@ -885,7 +840,6 @@ async fn execute_single_round(
     owner: &Keypair,
     fee_payer: &Keypair,
     decimals: u8,
-    alt_account: Option<AddressLookupTableAccount>,
     priority_fee: u64,
     rate_limiter: Arc<RateLimiter<
         governor::state::direct::NotKeyed,
@@ -1086,11 +1040,7 @@ async fn execute_single_round(
                 continue;
             }
         };
-        let test_msg = if let Some(alt) = &alt_account {
-            create_v0_message(&test_batch, &fee_payer.pubkey(), alt, priority_fee, test_blockhash)?
-        } else {
-            create_legacy_message(&test_batch, &fee_payer.pubkey(), priority_fee, test_blockhash)?
-        };
+        let test_msg = create_legacy_message(&test_batch, &fee_payer.pubkey(), priority_fee, test_blockhash)?;
 
         // Check size
         // Handle case where owner and fee_payer might be the same
@@ -1111,7 +1061,6 @@ async fn execute_single_round(
                     current_batch.clone(),
                     fee_payer,
                     owner,
-                    &alt_account,
                     priority_fee,
                 ).await {
                     Ok((sig, blockhash, slot)) => {
@@ -1153,7 +1102,6 @@ async fn execute_single_round(
                 current_batch.clone(),
                 fee_payer,
                 owner,
-                &alt_account,
                 priority_fee,
             ).await {
                 Ok((sig, blockhash, slot)) => {
@@ -1192,7 +1140,6 @@ async fn execute_single_round(
             current_batch,
             fee_payer,
             owner,
-            &alt_account,
             priority_fee,
         ).await {
             Ok((sig, blockhash, slot)) => {
@@ -1392,7 +1339,6 @@ async fn send_transfer_batch(
     instructions: Vec<Instruction>,
     fee_payer: &Keypair,
     owner: &Keypair,
-    alt_account: &Option<AddressLookupTableAccount>,
     priority_fee: u64,
 ) -> Result<(Signature, Hash, u64)> {
     let max_retries = 3;
@@ -1404,18 +1350,15 @@ async fn send_transfer_batch(
     loop {
         let blockhash = client.get_latest_blockhash().await?;
         
-        let message = if let Some(alt) = alt_account {
-            create_v0_message_with_cu(&instructions, &fee_payer.pubkey(), alt, priority_fee, cu_limit, blockhash)?
-        } else {
-            create_legacy_message_with_cu(&instructions, &fee_payer.pubkey(), priority_fee, cu_limit, blockhash)?
-        };
+        let message = create_legacy_message_with_cu(&instructions, &fee_payer.pubkey(), priority_fee, cu_limit, blockhash)?;
 
         // Handle case where owner and fee_payer might be the same
-        let tx = if fee_payer.pubkey() == owner.pubkey() {
-            VersionedTransaction::try_new(message, &[fee_payer])?
+        let signers: Vec<&Keypair> = if fee_payer.pubkey() == owner.pubkey() {
+            vec![fee_payer]
         } else {
-            VersionedTransaction::try_new(message, &[fee_payer, owner])?
+            vec![fee_payer, owner]
         };
+        let tx = VersionedTransaction::try_new(message, &signers)?;
         
         match client.send_transaction(&tx).await {
             Ok(sig) => {
@@ -1455,7 +1398,6 @@ async fn send_and_confirm_batch_with_retry(
     client: &RpcClient,
     instructions: Vec<Instruction>,
     fee_payer: &Keypair,
-    alt_account: &Option<AddressLookupTableAccount>,
     priority_fee: u64,
     rate_limiter: &Arc<RateLimiter<
         governor::state::direct::NotKeyed,
@@ -1471,7 +1413,6 @@ async fn send_and_confirm_batch_with_retry(
         client,
         instructions,
         fee_payer,
-        alt_account,
         priority_fee,
         cu_limit,
         rate_limiter,
@@ -1482,7 +1423,6 @@ async fn send_and_confirm_batch_with_cu(
     client: &RpcClient,
     instructions: Vec<Instruction>,
     fee_payer: &Keypair,
-    alt_account: &Option<AddressLookupTableAccount>,
     priority_fee: u64,
     cu_limit: u32,
     rate_limiter: &Arc<RateLimiter<
@@ -1499,12 +1439,7 @@ async fn send_and_confirm_batch_with_cu(
     loop {
         let blockhash = client.get_latest_blockhash().await?;
         
-        let message = if let Some(alt) = alt_account {
-            create_v0_message_with_cu(&instructions, &fee_payer.pubkey(), alt, priority_fee, cu_limit, blockhash)?
-        } else {
-            create_legacy_message_with_cu(&instructions, &fee_payer.pubkey(), priority_fee, cu_limit, blockhash)?
-        };
-
+        let message = create_legacy_message_with_cu(&instructions, &fee_payer.pubkey(), priority_fee, cu_limit, blockhash)?;
         let tx = VersionedTransaction::try_new(message, &[fee_payer])?;
         
         match client.send_and_confirm_transaction(&tx).await {
@@ -1536,28 +1471,6 @@ async fn send_and_confirm_batch_with_cu(
     }
 }
 
-fn create_v0_message(
-    instructions: &[Instruction],
-    payer: &Pubkey,
-    alt: &AddressLookupTableAccount,
-    priority_fee: u64,
-    blockhash: Hash,
-) -> Result<VersionedMessage> {
-    let mut all_instructions = vec![
-        ComputeBudgetInstruction::set_compute_unit_limit(300_000),
-        ComputeBudgetInstruction::set_compute_unit_price(priority_fee),
-    ];
-    all_instructions.extend_from_slice(instructions);
-
-    Ok(VersionedMessage::V0(
-        v0::Message::try_compile(
-            payer,
-            &all_instructions,
-            &[alt.clone()],
-            blockhash,
-        )?
-    ))
-}
 
 fn create_legacy_message(
     instructions: &[Instruction],
@@ -1580,29 +1493,6 @@ fn create_legacy_message(
     ))
 }
 
-fn create_v0_message_with_cu(
-    instructions: &[Instruction],
-    payer: &Pubkey,
-    alt: &AddressLookupTableAccount,
-    priority_fee: u64,
-    cu_limit: u32,
-    blockhash: Hash,
-) -> Result<VersionedMessage> {
-    let mut all_instructions = vec![
-        ComputeBudgetInstruction::set_compute_unit_limit(cu_limit),
-        ComputeBudgetInstruction::set_compute_unit_price(priority_fee),
-    ];
-    all_instructions.extend_from_slice(instructions);
-
-    Ok(VersionedMessage::V0(
-        v0::Message::try_compile(
-            payer,
-            &all_instructions,
-            &[alt.clone()],
-            blockhash,
-        )?
-    ))
-}
 
 fn create_legacy_message_with_cu(
     instructions: &[Instruction],
@@ -1626,160 +1516,7 @@ fn create_legacy_message_with_cu(
     ))
 }
 
-async fn load_alt(
-    client: &RpcClient,
-    alt_pubkey: &Pubkey,
-) -> Result<AddressLookupTableAccount> {
-    let account = client.get_account(alt_pubkey).await?;
-    let alt_data = AddressLookupTable::deserialize(&account.data)?;
-    
-    Ok(AddressLookupTableAccount {
-        key: *alt_pubkey,
-        addresses: alt_data.addresses.to_vec(),
-    })
-}
 
-fn validate_alt_completeness(
-    alt: &AddressLookupTableAccount,
-    mint: &Pubkey,
-    source_token_account: &Pubkey,
-    owner: &Pubkey,
-) -> Result<()> {
-    // Calculate source ATA
-    let source_ata = get_associated_token_address(owner, mint);
-    
-    let required_addresses = vec![
-        spl_token::id(),
-        spl_associated_token_account::id(),
-        solana_sdk::system_program::id(),
-        solana_sdk::compute_budget::id(), // ComputeBudget program
-        *mint,
-        *source_token_account,
-        source_ata,
-        *owner,
-    ];
-    
-    let mut missing = Vec::new();
-    for addr in &required_addresses {
-        if !alt.addresses.contains(addr) {
-            missing.push(*addr);
-        }
-    }
-    
-    if !missing.is_empty() {
-        eprintln!("⚠️  Warning: ALT is missing the following required addresses:");
-        for addr in &missing {
-            eprintln!("  - {}", addr);
-        }
-        eprintln!("\nConsider recreating the ALT with all required addresses to maximize transaction capacity.");
-        // Don't fail, just warn
-    }
-    
-    // Check ALT capacity - actual limit is ~65k addresses
-    const MAX_ALT_ADDRESSES: usize = 65_536;
-    const WARN_THRESHOLD: usize = 60_000;
-    let used = alt.addresses.len();
-    let remaining = MAX_ALT_ADDRESSES.saturating_sub(used);
-    
-    if used >= WARN_THRESHOLD {
-        eprintln!("⚠️  Warning: ALT is approaching capacity ({}/{} addresses, {} slots remaining).", 
-                  used, MAX_ALT_ADDRESSES, remaining);
-    } else {
-        eprintln!("ℹ️  ALT has {} addresses ({} slots remaining)", used, remaining);
-    }
-    
-    Ok(())
-}
-
-async fn create_alt(args: CreateAltArgs) -> Result<()> {
-    use solana_sdk::address_lookup_table::{
-        instruction::{create_lookup_table, extend_lookup_table},
-    };
-    
-    println!("Creating Address Lookup Table...");
-    
-    let fee_payer = load_keypair(&args.fee_payer)?;
-    let client = RpcClient::new_with_commitment(
-        args.url,
-        CommitmentConfig::confirmed(),
-    );
-
-    // Load recipients to get addresses
-    let recipients = load_recipients(&args.recipients_csv, &Pubkey::default())?;
-    let mut addresses: Vec<Pubkey> = recipients.iter().map(|r| r.recipient).collect();
-    
-    // Also add common program IDs and token accounts
-    addresses.push(spl_token::id());
-    addresses.push(spl_associated_token_account::id());
-    addresses.push(solana_sdk::system_program::id());
-    
-    // Remove duplicates
-    addresses.sort();
-    addresses.dedup();
-    
-    println!("Creating ALT for {} unique addresses", addresses.len());
-    
-    // Create the lookup table
-    let recent_slot = client.get_slot().await?;
-    let (create_ix, alt_address) = create_lookup_table(
-        fee_payer.pubkey(),
-        fee_payer.pubkey(),
-        recent_slot,
-    );
-    
-    let blockhash = client.get_latest_blockhash().await?;
-    let create_tx = Transaction::new_signed_with_payer(
-        &[create_ix],
-        Some(&fee_payer.pubkey()),
-        &[&fee_payer],
-        blockhash,
-    );
-    
-    let sig = client.send_and_confirm_transaction(&create_tx).await?;
-    println!("✓ Created ALT {} (sig: {})", alt_address, sig);
-    
-    // Wait for activation
-    sleep(Duration::from_secs(2)).await;
-    
-    // Extend in chunks of 20 addresses (transaction size limit)
-    for (i, chunk) in addresses.chunks(20).enumerate() {
-        let extend_ix = extend_lookup_table(
-            alt_address,
-            fee_payer.pubkey(),
-            Some(fee_payer.pubkey()),
-            chunk.to_vec(),
-        );
-        
-        let blockhash = client.get_latest_blockhash().await?;
-        let extend_tx = Transaction::new_signed_with_payer(
-            &[extend_ix],
-            Some(&fee_payer.pubkey()),
-            &[&fee_payer],
-            blockhash,
-        );
-        
-        match client.send_and_confirm_transaction(&extend_tx).await {
-            Ok(_sig) => {
-                println!("✓ Extended ALT with chunk {} ({} addresses)", i + 1, chunk.len());
-            }
-            Err(e) => {
-                println!("❌ Failed to extend ALT with chunk {}: {}", i + 1, e);
-                return Err(e.into());
-            }
-        }
-        
-        // Small delay between chunks
-        if i < addresses.chunks(20).count() - 1 {
-            sleep(Duration::from_millis(500)).await;
-        }
-    }
-    
-    println!("\n✅ ALT created successfully!");
-    println!("Address: {}", alt_address);
-    println!("Use with: --alt {}", alt_address);
-    
-    Ok(())
-}
 
 fn dry_run_summary(
     distributions: &[Distribution],
@@ -1853,26 +1590,13 @@ async fn simulate_compute_units(
     instructions: &[Instruction],
     payer: &Pubkey,
 ) -> Result<u32> {
-    simulate_compute_units_with_alt(client, instructions, payer, None).await
-}
-
-async fn simulate_compute_units_with_alt(
-    client: &RpcClient,
-    instructions: &[Instruction],
-    payer: &Pubkey,
-    alt: Option<&AddressLookupTableAccount>,
-) -> Result<u32> {
     use solana_client::rpc_config::RpcSimulateTransactionConfig;
     
-    // Create a test transaction for simulation with actual message type
+    // Create a test transaction for simulation
     let blockhash = client.get_latest_blockhash().await?;
     
-    // Build the same message type we'll actually use
-    let message = if let Some(alt_account) = alt {
-        create_v0_message(instructions, payer, alt_account, 1000, blockhash)?
-    } else {
-        create_legacy_message(instructions, payer, 1000, blockhash)?
-    };
+    // Build a legacy message for simulation
+    let message = create_legacy_message(instructions, payer, 1000, blockhash)?;
     
     // Create unsigned transaction for simulation
     let tx = VersionedTransaction {
@@ -1922,6 +1646,7 @@ fn extract_retry_after(error_str: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use solana_sdk::transaction::Transaction;
     
     #[test]
     fn test_state_msg_creation() {
@@ -2467,7 +2192,6 @@ mod tests {
             url: "https://api.devnet.solana.com".to_string(),
             dry_run: false,
             rate_limit: 10,
-            alt: None,
             state_file: None, // Auto-generate
             state_dir: state_dir.clone(),
             priority_fee: 1000,
