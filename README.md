@@ -2,132 +2,22 @@
 
 A high-performance, production-ready SPL token distribution tool for Solana. Handles massive airdrops with automatic retry, state persistence, and crash recovery.
 
-## Architecture Overview
+## How It Works
 
 ```mermaid
-graph TB
-    subgraph "Input"
-        CSV[CSV File<br/>recipients,amount]
-        KEYS[Keypairs<br/>owner,fee-payer]
-    end
+graph LR
+    CSV[📄 CSV File] --> TOOL[SPL Dropper]
+    TOOL --> SOL[⛓️ Solana]
+    TOOL <--> STATE[💾 State File]
     
-    subgraph "Core Engine"
-        CLI[CLI Parser]
-        DIST[Distribution Engine]
-        STATE[State Manager]
-        BATCH[Batch Processor]
-        RETRY[Retry Handler]
-    end
-    
-    subgraph "Blockchain"
-        RPC[Solana RPC]
-        CHAIN[Solana Network]
-    end
-    
-    subgraph "Persistence"
-        SFILE[State File<br/>.spl-dropper-state/]
-    end
-    
-    CSV --> CLI
-    KEYS --> CLI
-    CLI --> DIST
-    DIST --> STATE
-    DIST --> BATCH
-    STATE <--> SFILE
-    BATCH --> RPC
-    RPC --> CHAIN
-    BATCH --> RETRY
-    RETRY --> BATCH
-    
-    style CSV fill:#e1f5fe
-    style KEYS fill:#e1f5fe
-    style CHAIN fill:#fff3e0
-    style SFILE fill:#f3e5f5
+    style TOOL fill:#e3f2fd
 ```
 
-## Distribution Flow
-
-```mermaid
-flowchart TD
-    Start([Start Distribution])
-    Load[Load Recipients CSV]
-    CheckState{State File<br/>Exists?}
-    LoadState[Load Previous State]
-    Filter[Filter Completed Recipients]
-    CheckBalance{Sufficient<br/>Balance?}
-    CreateATA{Need ATA<br/>Creation?}
-    CreateATAs[Create ATAs in Batches]
-    BatchTx[Create Transfer Batches<br/>10 transfers/tx]
-    SendTx[Send Transaction]
-    Monitor[Monitor Confirmations]
-    Confirmed{Transaction<br/>Confirmed?}
-    UpdateState[Update State File]
-    Failed{Transaction<br/>Failed?}
-    Expired{Transaction<br/>Expired?}
-    Retry[Add to Retry Queue]
-    AllDone{All Recipients<br/>Processed?}
-    End([Distribution Complete])
-    
-    Start --> Load
-    Load --> CheckState
-    CheckState -->|Yes| LoadState
-    CheckState -->|No| Filter
-    LoadState --> Filter
-    Filter --> CheckBalance
-    CheckBalance -->|No| End
-    CheckBalance -->|Yes| CreateATA
-    CreateATA -->|Yes| CreateATAs
-    CreateATA -->|No| BatchTx
-    CreateATAs --> BatchTx
-    BatchTx --> SendTx
-    SendTx --> Monitor
-    Monitor --> Confirmed
-    Confirmed -->|Yes| UpdateState
-    Confirmed -->|No| Failed
-    Failed -->|Yes| UpdateState
-    Failed -->|No| Expired
-    Expired -->|Yes| Retry
-    Expired -->|No| Monitor
-    UpdateState --> AllDone
-    Retry --> BatchTx
-    AllDone -->|No| BatchTx
-    AllDone -->|Yes| End
-    
-    style Start fill:#c8e6c9
-    style End fill:#ffcdd2
-    style UpdateState fill:#fff9c4
-```
-
-## State Management
-
-```mermaid
-stateDiagram-v2
-    [*] --> Fresh: New Distribution
-    Fresh --> Processing: Start
-    Processing --> Pending: Transaction Sent
-    Pending --> Confirmed: Success
-    Pending --> Failed: Error
-    Pending --> Expired: Timeout (150 slots)
-    Failed --> Retry: Automatic
-    Expired --> Retry: Automatic
-    Retry --> Processing: Re-batch
-    Confirmed --> Completed: Update State
-    Completed --> [*]
-    
-    note right of Pending
-        Transactions tracked with:
-        - Signature
-        - Recipients
-        - Sent slot
-        - Blockhash
-    end note
-    
-    note right of Expired
-        After 150 slots (~1 min)
-        transaction is considered
-        expired and retried
-    end note
-```
+**Key Features:**
+- Batches 10 transfers per transaction for efficiency
+- Saves progress automatically (resume anytime)
+- Retries failed transactions automatically
+- Handles token account creation if needed
 
 ## Features
 
@@ -141,89 +31,22 @@ stateDiagram-v2
 - 🧪 **Test Mode**: Use `--limit` to test with small batches before full runs
 - 💸 **Fee Optimization**: Calculates actual costs based on your priority fee settings
 
-## Transaction Batching Process
-
-```mermaid
-graph LR
-    subgraph "Batch Creation"
-        R1[Recipient 1]
-        R2[Recipient 2]
-        R3[Recipient 3]
-        RN[... up to 10]
-        BATCH[Transaction Batch]
-        
-        R1 --> BATCH
-        R2 --> BATCH
-        R3 --> BATCH
-        RN --> BATCH
-    end
-    
-    subgraph "Transaction Structure"
-        CU[Compute Budget<br/>Instructions]
-        T1[Transfer 1]
-        T2[Transfer 2]
-        T10[Transfer 10]
-        TX[Versioned<br/>Transaction]
-        
-        CU --> TX
-        T1 --> TX
-        T2 --> TX
-        T10 --> TX
-    end
-    
-    subgraph "Size Validation"
-        CHECK{Size < 1232 bytes?}
-        SEND[Send Batch]
-        FLUSH[Flush & Create<br/>New Batch]
-    end
-    
-    BATCH --> CU
-    TX --> CHECK
-    CHECK -->|Yes| SEND
-    CHECK -->|No| FLUSH
-    
-    style BATCH fill:#e3f2fd
-    style TX fill:#fff3e0
-    style CHECK fill:#ffebee
-```
-
-## Cost Calculation
-
-```mermaid
-graph TD
-    subgraph "Cost Components"
-        BASE[Base Fee<br/>0.000005 SOL]
-        PRIORITY[Priority Fee<br/>priority × 200k CU ÷ 1e15]
-        RENT[ATA Rent<br/>0.00203928 SOL/account]
-    end
-    
-    subgraph "Transaction Costs"
-        ATA_TX[ATA Creation Txs<br/>count ÷ 10 × tx_fee]
-        TRANSFER_TX[Transfer Txs<br/>recipients ÷ 10 × tx_fee]
-    end
-    
-    subgraph "Total Cost"
-        TOTAL[Total Estimated Cost]
-    end
-    
-    BASE --> ATA_TX
-    PRIORITY --> ATA_TX
-    BASE --> TRANSFER_TX
-    PRIORITY --> TRANSFER_TX
-    RENT --> TOTAL
-    ATA_TX --> TOTAL
-    TRANSFER_TX --> TOTAL
-    
-    style BASE fill:#e8f5e9
-    style PRIORITY fill:#fff9c4
-    style RENT fill:#fce4ec
-    style TOTAL fill:#e1f5fe
-```
 
 ## Installation
 
 ```bash
 cargo build --release
+```
+
+## Workflow
+
+```mermaid
+graph TD
+    A[1. Prepare CSV] --> B[2. Run Distribution]
+    B --> C{Interrupted?}
+    C -->|Yes| D[Run Again - Auto Resume]
+    C -->|No| E[✅ Complete]
+    D --> B
 ```
 
 ## Quick Start
