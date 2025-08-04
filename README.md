@@ -42,10 +42,10 @@ cargo build --release
 
 ```mermaid
 graph TD
-    A[1. Prepare CSV] --> B[2. Run Distribution]
+    A[Prepare CSV] --> B[Run Distribution]
     B --> C{Interrupted?}
     C -->|Yes| D[Run Again - Auto Resume]
-    C -->|No| E[✅ Complete]
+    C -->|No| E[Complete]
     D --> B
 ```
 
